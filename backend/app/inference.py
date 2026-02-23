@@ -1,3 +1,10 @@
+"""
+Ici on garde les choses simples et explicites :
+- on charge le modèle et la config une seule fois (c'est plus rapide pour l'API),
+- on n'ajoute jamais de bruit côté inference (c'est cohérent avec le threshold),
+- on renvoie des images encodées en base64 pour que le front les affiche facilement.
+"""
+
 import os
 import json
 import io
@@ -10,15 +17,18 @@ from app.model import CDAE
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
+# Module-level cache: on charge le modèle et la configuration une seule fois.
+# Ceci évite de relire les fichiers depuis le disque à chaque requête HTTP.
 _model = None
 _cfg   = None
 
 
 def load_artifacts():
-    """
-    Charge 1 seule fois :
-    - le modèle  (cdae.pt)
-    - la config  (threshold.json)
+    """Charge le modèle et la config depuis `app/assets` la première fois.
+
+    Petit mode d'emploi : si les fichiers n'existent pas, on lève une erreur claire
+    pour te dire de lancer d'abord l'entraînement. Le modèle est chargé sur le
+    `DEVICE` détecté et mis en `eval()`.
     """
     global _model, _cfg
 
@@ -52,11 +62,15 @@ def pil_to_base64(img: Image.Image) -> str:
 
 
 def preprocess_image(pil_img: Image.Image) -> torch.Tensor:
-    """
-    - grayscale
-    - resize 28x28
-    - normalisation [0,1]
-    - shape (1,1,28,28)
+    """Prépare l'image pour le modèle :
+
+    - conversion en niveaux de gris
+    - redimensionnement en 28×28
+    - mise à l'échelle dans [0, 1]
+    - ajout des dimensions batch/channel pour obtenir (1,1,28,28)
+
+    On garde exactement le même preprocess que pendant l'entraînement pour
+    éviter toute surprise dans la distribution des données.
     """
     img = pil_img.convert("L").resize((28, 28))
     arr = np.array(img).astype(np.float32) / 255.0
@@ -79,16 +93,15 @@ def make_heatmap(err_map: np.ndarray) -> Image.Image:
 
 @torch.no_grad()
 def predict(pil_img: Image.Image):
-    """
-    Pipeline d'inférence :
-    1) preprocess -> x_clean  (28x28, [0,1])
-    2) reconstruction SANS bruit  (cohérent avec le calcul du threshold)
-    3) score = mean((x_clean - x_hat)^2)
-    4) comparaison au threshold -> normal / anomalie
+    """Fait la reconstruction et renvoie un dict prêt à être sérialisé.
+
+    Étapes : preprocessing → reconstruction (pas de bruit) → calcul du score
+    → comparaison au threshold. Le dict contient aussi des images encodées en
+    base64 pour un affichage direct côté frontend.
     """
     model, cfg = load_artifacts()
 
-    # ✅ Image propre uniquement — pas de bruit en inférence
+    # Image propre uniquement — pas de bruit en inférence (cohérent avec le seuil)
     x     = preprocess_image(pil_img).to(DEVICE)
     x_hat, z = model(x)
 

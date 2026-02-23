@@ -1,3 +1,13 @@
+"""
+on entraîne un petit autoencodeur uniquement sur une classe "normale" pour qu'il reconstruise bien
+cette classe et se trompe sur tout le reste. On sauve ensuite un seuil (percentile)
+qui sert à décider si une image est anormale.
+
+Pourquoi faire du "denoising" (noisy -> clean) ? Parce que si on ajoute du bruit
+à l'entrée pendant l'entraînement, le réseau apprend à extraire les caractéristiques
+essentielles et n'apprend pas à mémoriser les détails.
+"""
+
 import os
 import json
 import torch
@@ -11,10 +21,21 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 def add_noise(x: torch.Tensor, noise: float = 0.5) -> torch.Tensor:
+    """Ajoute du bruit gaussien aux images (utilisé seulement à l'entraînement).
+
+    on utilise ce bruit pour rendre la tâche plus robuste. Le réseau
+    apprend à ignorer le "bruit" et à garder l'information utile.
+    """
     return (x + noise * torch.randn_like(x)).clamp(0.0, 1.0)
 
 
 def percentile(values, p: float):
+    """Renvoie le percentile p d'une liste (ex: p=0.95 -> 95%).
+
+    Pourquoi on fait ça ? Parce que pour fixer un seuil de détection on préfère
+    une position dans la distribution (percentile) plutôt qu'une moyenne, ça
+    évite d'être trop affecté par des valeurs parasites.
+    """
     values = sorted(values)
     if not values:
         return 0.0
@@ -25,12 +46,20 @@ def percentile(values, p: float):
 def main():
 
     # ----------------------------
-    # PARAMÈTRES
+    # PARAMÈTRES (modifiables facilement)
     # ----------------------------
-    normal_class    = 0      # chiffre considéré comme "normal"
-    latent_channels = 2       # bottleneck plus large qu'avant mais architecture allégée
-    noise           = 0.6    # bruit plus fort pour mieux forcer la spécialisation
-    epochs          = 50
+    # La classe que l'on considère comme "normale" — on n'entraîne que dessus.
+    normal_class    = 0
+
+    # Taille du canal latent. Plus petit = modèle plus contraint, donc plus
+    # porté à spécialiser sa reconstruction.
+    latent_channels = 4
+
+    # Force du bruit lors de l'entraînement (noisy -> clean)
+    noise           = 0.5
+
+    # Optimisation / durée
+    epochs          = 30
     batch_size      = 256
     lr              = 1e-3
     weight_decay    = 1e-4
@@ -84,8 +113,13 @@ def main():
 
     # ----------------------------
     # THRESHOLD  (p95 sur images PROPRES)
-    # ✅ Pas de bruit ici : en inférence l'utilisateur envoie des images propres
-    # ✅ p95 au lieu de p98 pour un seuil plus bas → moins de faux négatifs
+    # ----------------------------
+    # Calcul du seuil sur les reconstructions des images propres (sans bruit).
+    # Remarques:
+    # - On utilise un percentile (ici p95) pour fixer un seuil robuste.
+    # - Le choix de p95 vs p98/90 dépend du compromis entre faux positifs/négatifs.
+    # - Important: l'inférence attend des images propres; c'est cohérent avec
+    #   le calcul du seuil ci-dessous.
     # ----------------------------
     model.eval()
     normal_scores = []
@@ -93,7 +127,7 @@ def main():
     with torch.no_grad():
         for x, _ in train_loader:
             x = x.to(DEVICE)
-            x_hat, _ = model(x)   # ✅ image propre en entrée
+            x_hat, _ = model(x)   # image propre en entrée
 
             mse = ((x - x_hat) ** 2).mean(dim=(1, 2, 3))
             normal_scores.extend(mse.cpu().tolist())
@@ -121,7 +155,7 @@ def main():
             indent=2,
         )
 
-    print("✅ Saved model and threshold.")
+    print("Saved model and threshold.")
 
     # ----------------------------
     # TEST CHECK  (classe normale vs anomalie)
@@ -134,7 +168,7 @@ def main():
     with torch.no_grad():
         for x, y in test_loader:
             x = x.to(DEVICE)
-            x_hat, _ = model(x)   # ✅ pas de bruit en inférence
+            x_hat, _ = model(x)   # pas de bruit en inférence
 
             mse = ((x - x_hat) ** 2).mean(dim=(1, 2, 3)).cpu().tolist()
 
