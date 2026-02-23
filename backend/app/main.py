@@ -9,7 +9,7 @@ app = FastAPI(title="CDAE API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=["http://localhost:5174"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -25,4 +25,4 @@ async def reconstruct(file: UploadFile = File(...)):
     img = Image.open(io.BytesIO(content))
 
     # Denoising demo: bruit ON
-    return predict(img, add_noise=True, noise_level=0.4)
+    return predict(img, add_noise=False)

@@ -9,9 +9,11 @@ from app.model import CDAE
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
+
 def add_noise(x: torch.Tensor, noise: float = 0.3) -> torch.Tensor:
     """Ajoute du bruit gaussien et clip dans [0,1]."""
     return (x + noise * torch.randn_like(x)).clamp(0.0, 1.0)
+
 
 def percentile(values, p: float):
     """Percentile simple (p en [0,1])."""
@@ -21,16 +23,20 @@ def percentile(values, p: float):
     idx = int(p * (len(values) - 1))
     return values[idx]
 
+
 def main():
     # ----------------------------
     # PARAMÈTRES
     # ----------------------------
     normal_class = 0          # 0 = T-shirt/top (Fashion-MNIST)
-    latent_channels = 16      # bottleneck channels
+    latent_channels = 4       # bottleneck channels (plus petit = plus discriminant)
     noise = 0.3               # bruit utilisé pour denoising (train + calibration threshold)
-    epochs = 40               # tu peux garder 40
+    epochs = 40
     batch_size = 256
     lr = 1e-3
+
+    # Régularisation légère (réduit la généralisation)
+    weight_decay = 1e-5
 
     # ----------------------------
     # DATASET: Fashion-MNIST
@@ -51,7 +57,7 @@ def main():
     # MODEL + OPT + LOSS
     # ----------------------------
     model = CDAE(latent_channels=latent_channels).to(DEVICE)
-    opt = torch.optim.Adam(model.parameters(), lr=lr)
+    opt = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
     loss_fn = nn.MSELoss()
 
     # ----------------------------
@@ -79,10 +85,7 @@ def main():
         print(f"Epoch {ep}/{epochs} - loss: {total_loss / max(n,1):.6f}")
 
     # ----------------------------
-    # ✅ SOLUTION UNIQUE: THRESHOLD CALIBRÉ COMME L'INFÉRENCE
-    #
-    # On calcule le threshold sur les "normaux" du TRAIN, en condition noisy->clean,
-    # comme quand le backend fait: x_noisy -> x_hat puis compare à x_clean.
+    # THRESHOLD CALIBRÉ COMME L'INFÉRENCE (noisy->clean)
     # ----------------------------
     model.eval()
     normal_scores = []
@@ -94,11 +97,12 @@ def main():
             x_hat, _ = model(x_noisy)
 
             # Score par image = MSE(x_clean, x_hat)
-            mse_per_img = ((x - x_hat) ** 2).mean(dim=(1,2,3)).detach().cpu().tolist()
+            mse_per_img = ((x - x_hat) ** 2).mean(dim=(1, 2, 3)).detach().cpu().tolist()
             normal_scores.extend([float(s) for s in mse_per_img])
 
-    threshold = percentile(normal_scores, 0.95)
-    print("Threshold (p95 train normal, noisy->clean):", threshold)
+    # p98 = moins de faux "anomaly" sur des vrais t-shirts
+    threshold = percentile(normal_scores, 0.98)
+    print("Threshold (p98 train normal, noisy->clean):", threshold)
 
     # ----------------------------
     # SAVE: weights + threshold config
@@ -115,6 +119,7 @@ def main():
                 "normal_class": normal_class,
                 "noise": noise,
                 "latent_channels": latent_channels,
+                "weight_decay": weight_decay,
             },
             f,
             indent=2
@@ -122,25 +127,41 @@ def main():
 
     print("Saved:", os.path.join(assets_dir, "cdae.pt"), "and threshold.json")
 
-    # (Optionnel) mini check sur le test set: juste afficher moyenne score sur test normaux
-    # Ça aide à voir si on est “dans les clous”
+    # ----------------------------
+    # (Optionnel) CHECK GLOBAL: classe 0 vs toutes les autres classes (1..9)
+    # Objectif : ID = classe 0, OOD/anomaly = classes 1..9
+    # ----------------------------
     model.eval()
-    test_scores_norm = []
+    scores_normal = []
+    scores_anom = []
+
     with torch.no_grad():
         for x, y in test_loader:
             x = x.to(DEVICE)
-            y = y.cpu()
+            y_cpu = y.cpu()
 
             x_noisy = add_noise(x, noise)
             x_hat, _ = model(x_noisy)
 
-            mse = ((x - x_hat) ** 2).mean(dim=(1,2,3)).detach().cpu().tolist()
-            for s, yy in zip(mse, y.tolist()):
+            mse = ((x - x_hat) ** 2).mean(dim=(1, 2, 3)).detach().cpu().tolist()
+            for s, yy in zip(mse, y_cpu.tolist()):
                 if yy == normal_class:
-                    test_scores_norm.append(float(s))
+                    scores_normal.append(float(s))
+                else:
+                    scores_anom.append(float(s))
 
-    if test_scores_norm:
-        print("Test normal mean score:", sum(test_scores_norm) / len(test_scores_norm))
+    if scores_normal:
+        mean_n = sum(scores_normal) / len(scores_normal)
+        fpr = sum(1 for s in scores_normal if s > threshold) / len(scores_normal)
+        print(f"Test NORMAL (class {normal_class}) mean score: {mean_n:.6f}")
+        print(f"FPR (normal flagged anomaly): {100*fpr:.2f}%")
+
+    if scores_anom:
+        mean_a = sum(scores_anom) / len(scores_anom)
+        tpr = sum(1 for s in scores_anom if s > threshold) / len(scores_anom)
+        print(f"Test ANOMALY (classes != {normal_class}) mean score: {mean_a:.6f}")
+        print(f"TPR (anomaly detected): {100*tpr:.2f}%")
+
 
 if __name__ == "__main__":
     main()
