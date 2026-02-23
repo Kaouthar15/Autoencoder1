@@ -15,14 +15,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 @app.get("/api/health")
 def health():
     return {"status": "ok"}
 
+
 @app.post("/api/reconstruct")
 async def reconstruct(file: UploadFile = File(...)):
     content = await file.read()
-    img = Image.open(io.BytesIO(content))
+    img     = Image.open(io.BytesIO(content))
 
-    # Denoising demo: bruit ON
-    return predict(img, add_noise=False)
+    # ✅ Plus de paramètre add_noise : l'inférence est toujours sans bruit
+    return predict(img)
